@@ -1,17 +1,19 @@
-name: AI PR Review (Reusable)
+name: AI PR Review (Reusable - 9router)
 
 on:
   workflow_call:
     inputs:
-      model:
+      router_base_url:
         required: false
         type: string
-        default: "claude-sonnet-4-5"
+        default: "https://router.appscolmeia.com/v1"
+      default_model:
+        required: false
+        type: string
+        default: "cx/codex-auto-review"
     secrets:
-      ANTHROPIC_API_KEY:
-        required: false
-      CLAUDE_CODE_OAUTH_TOKEN:
-        required: false
+      ROUTER_API_KEY:
+        required: true
 
 jobs:
   review:
@@ -26,13 +28,73 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Claude Code PR Review
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Revise este Pull Request em português do Brasil, de forma objetiva.
-            Aponte apenas: bugs reais, riscos de segurança, quebras de contrato e problemas graves de desempenho.
-            Ignore estilo trivial.
-          claude_args: "--model ${{ inputs.model }}"
+      - name: Selecionar modelo
+        id: model
+        run: |
+          LABELS='${{ toJson(github.event.pull_request.labels.*.name) }}'
+          if echo "$LABELS" | grep -q '"review:deep"'; then
+            echo "id=ag/gemini-4-neon-high" >> "$GITHUB_OUTPUT"
+          elif echo "$LABELS" | grep -q '"review:fast"'; then
+            echo "id=ocg/glm-5.3-flash" >> "$GITHUB_OUTPUT"
+          else
+            echo "id=${{ inputs.default_model }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Revisar diff com IA via 9router
+        env:
+          ROUTER_BASE_URL: ${{ inputs.router_base_url }}
+          ROUTER_API_KEY: ${{ secrets.ROUTER_API_KEY }}
+          MODEL_ID: ${{ steps.model.outputs.id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch origin "${BASE_REF}" --depth=1 || true
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/pr.diff
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "Sem alterações para revisar."
+            exit 0
+          fi
+
+          python3 - << 'PY'
+          import json, os, urllib.request
+
+          diff = open("/tmp/pr.diff", errors="replace").read()[:60000]
+          model_id = os.environ["MODEL_ID"]
+          api_key = os.environ["ROUTER_API_KEY"]
+          base_url = os.environ["ROUTER_BASE_URL"].rstrip("/")
+          payload = {
+              "model": model_id,
+              "messages": [
+                  {
+                      "role": "system",
+                      "content": "Você é um revisor de código sênior. Responda em português do Brasil, de forma objetiva. Aponte apenas bugs reais, riscos de segurança, quebras de contrato e melhorias relevantes. Ignore estilo trivial."
+                  },
+                  {
+                      "role": "user",
+                      "content": f"Revise este diff do PR:\n\n```diff\n{diff}\n```"
+                  }
+              ]
+          }
+          req = urllib.request.Request(
+              f"{base_url}/chat/completions",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Authorization": f"Bearer {api_key}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "OpenAI/Python"
+              }
+          )
+          with urllib.request.urlopen(req, timeout=180) as r:
+              res = json.loads(r.read().decode())
+          body = f"### Revisão de Código (`{model_id}`)\n\n" + res["choices"][0]["message"]["content"]
+          open("/tmp/review.md", "w").write(body)
+          PY
+
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -d "$(jq -Rs '{body: .}' /tmp/review.md)" >/dev/null
+          echo "REVIEW_COMMENT_POSTED"
