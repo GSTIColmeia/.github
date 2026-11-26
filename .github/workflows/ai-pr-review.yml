@@ -1,0 +1,38 @@
+name: AI PR Review (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        required: false
+        type: string
+        default: "claude-sonnet-4-5"
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: false
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: false
+
+jobs:
+  review:
+    runs-on: [self-hosted, linux, x64, docker]
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude Code PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Revise este Pull Request em português do Brasil, de forma objetiva.
+            Aponte apenas: bugs reais, riscos de segurança, quebras de contrato e problemas graves de desempenho.
+            Ignore estilo trivial.
+          claude_args: "--model ${{ inputs.model }}"
