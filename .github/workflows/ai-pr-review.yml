@@ -17,7 +17,7 @@ on:
 
 jobs:
   review:
-    runs-on: [self-hosted, linux, x64, docker]
+    runs-on: [self-hosted, ai-review]
     permissions:
       contents: read
       pull-requests: write
